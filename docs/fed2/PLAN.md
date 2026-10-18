@@ -35,10 +35,14 @@ Date: 2026-10-18. Baseline: `@mercuriusjs/gateway` 5.2.0, `@mercuriusjs/federati
    conformance has to be our own test that composes the suite's `users` + `inventory` + `products` schemas and
    runs the suite's queries.
 
-**Decision proposed:** use `@theguild/federation-composition` for composition + validation (layer 2) and build the
-gateway's ownership index from its supergraph output. That turns "largest and riskiest" into "medium", keeps MIT,
-and makes layer 3 (planning) the real work. Hand-rolling Fed 2 composition is the fallback only if the Guild lib
-proves incompatible in practice.
+**Decisions (2026-10-18):**
+1. Composition: `@theguild/federation-composition` (MIT). Hand-rolled composition only if it proves incompatible.
+2. Delivery: new majors, `@mercuriusjs/gateway` 6 and `@mercuriusjs/federation` 6. Fed 2 composition + planner are
+   the default; Fed 1 subgraphs keep working through the same path (auto-detected, no `@link` ⇒ v1 semantics).
+3. First slice: `@link` + `@shareable` + `@override` + `@inaccessible`.
+4. Execution: a real **plan-then-execute query planner** replaces the resolver-per-field model (§4).
+5. Tooling/integration/migration are in scope (§5): precomposed supergraph input, `supergraphSdl` output, query
+   plan exposure, v1→v2 SDL upgrade helper.
 
 ## 1. Workspace layout
 
@@ -114,9 +118,9 @@ module.exports.LINK_SPEC = `
 ```
 lib/
 ├── gateway/
-│   ├── build-gateway.js         MOD  compose via lib/compose; defineResolvers takes a PlanIndex instead of the two maps
+│   ├── build-gateway.js         MOD  compose via lib/compose; register preExecution planner hook; root resolvers read plan result
 │   ├── service-map.js           MOD  keep parsed DocumentNode + detected fed version per service; drop createTypeMap in v2 path
-│   ├── make-resolver.js         MOD  swap ownership/selection/representation helpers for lib/planning/*
+│   ├── make-resolver.js         DEL  (phase 7) replaced by planner; subscriptions' root subscribe moves to planner/subscribe.js
 │   ├── find-value-types.js      KEEP (v1 path only; deleted when v1 composition is removed)
 │   ├── get-query-result.js      KEEP
 │   └── request.js               KEEP
@@ -125,12 +129,17 @@ lib/
 │   ├── plan-index.js            NEW  buildPlanIndex(supergraphDocumentNode) → PlanIndex
 │   ├── schema-from-supergraph.js NEW  executable GraphQLSchema: strip join__/link, apply @inaccessible, keep custom + composed directives
 │   └── errors.js                NEW  MER_ERR_GQL_GATEWAY_COMPOSITION (wraps Guild GraphQLErrors; keeps `extensions.code`)
-├── planning/
-│   ├── owner.js                 NEW  pickOwner({ planIndex, typeName, fieldName, parentGraph }) → graphName
-│   ├── selection.js             NEW  pruneSelectionForGraph(selections, graph, typeName, planIndex, schema) (replaces collectServiceTypeFields)
-│   ├── representation.js        NEW  buildRepresentation(obj, typeName, graph, planIndex) — picks a satisfiable key, supports nested keys
-│   ├── requires.js              NEW  collectRequires(field, graph) → selection set; ensure parent fetch includes it
-│   └── field-set.js             NEW  parseFieldSet('sku variation { id }') → SelectionSet; satisfiedBy(obj, selectionSet)
+├── planner/
+│   ├── index.js                 NEW  { buildQueryPlan, executePlan, printPlan }
+│   ├── nodes.js                 NEW  Sequence / Parallel / Fetch / Condition constructors + JSON serializer
+│   ├── build-query-plan.js      NEW  DocumentNode + PlanIndex → plan (§4.3)
+│   ├── owner.js                 NEW  pickOwner({ planIndex, typeName, fieldName, currentGraph, availableKeys })
+│   ├── paths.js                 NEW  key-bridge search: which graph can turn the keys we have into a key the owner accepts
+│   ├── field-set.js             NEW  parseFieldSet('sku variation { id }') → SelectionSet; satisfiedBy(obj, selectionSet)
+│   ├── fetch-document.js        NEW  build/print the per-Fetch operation (root or `_entities`), variable pruning, fragments
+│   ├── execute-plan.js          NEW  run the tree, collect representations by path, merge entities, map errors (§4.4)
+│   ├── cache.js                 NEW  plan LRU keyed by schema version + operation + document hash
+│   └── print-plan.js            NEW  human-readable plan for `explain()` and test snapshots
 ├── errors.js                    MOD  new error codes
 └── util.js                      MOD  remove `requires`-as-extension marker from v2 path
 index.d.ts                       MOD  gateway.federation?: { version?: 1 | 2 }, gateway.composition?: { onError?, allowV1? }
@@ -214,52 +223,119 @@ Rules encoded in `plan-index.js`:
   the parent payload (no extra hop);
 - `@join__type(graph:G, key:K, resolvable:false)` ⇒ never send `_entities` for T to G.
 
-## 4. Resolver model with the PlanIndex (layer 3)
+## 4. Query planner: plan-then-execute (layer 3)
 
-`defineResolvers` loop, per `(type, field)`:
+### 4.1 Integration point with mercurius
+
+Mercurius owns parse/validate/execute (graphql-js). We do not replace `execute`; we plan and execute the whole
+operation **before** graphql-js runs and let graphql-js shape the response from the plan result:
 
 ```
-owners = index.types[T].fields[f].owners
-if Query/Mutation/Subscription root      → makeResolver(query op, owner = single owner)
-elif owners is empty (introspection etc) → read from parent
-else:
-  resolver = (parent, args, ctx, info) =>
-    g = pickOwner({ parentGraph: parent[kGraph], owners, T })   // prefer the graph the parent came from
-    if parent has f and g == parentGraph                        → return parent[f]
-    rep = buildRepresentation(parent, T, g, index)              // choose a key g accepts that parent satisfies
-    if rep == null                                              → multi-hop: fetch missing key via a graph that has it (phase 4), else error
-    reqs = collectRequires(T, f, g)                             // merge required fields into rep (nested OK)
-    return entityLoader(g).load({ T, rep ∪ reqs, selection: prune(info, g, T) })
+preExecution hook (gateway)                       root field resolvers (Query/Mutation)
+  plan   = planCache.get(doc, opName) ?? buildQueryPlan(doc, planIndex)
+  result = await executePlan(plan, { variables, context })      →   return context[kPlanResult].data[field]
+  context[kPlanResult] = result; errors → addErrorsToContext
 ```
 
-Two mechanics that make this work and are new:
-- **Tag payloads with origin graph.** `makeResolver` stamps `Symbol(kGraph)` on objects returned by a service so
-  children know which graph the parent came from (today the code infers this from the static map).
-- **Selection pruning uses `index.types[T].graphs[g].fields`** and recurses through nested object types using the
-  same index, adding every key field-set that `g` accepts for `T` (not only the first `@key`) so a later hop can
-  build a representation.
+- Non-root object fields get the trivial parent-read resolver; graphql-js handles nullability, aliases, fragments,
+  `@skip`/`@include` on the already-fetched data (fetch selections are built from the same document, so unused
+  branches are not fetched).
+- Subscriptions: the root `subscribe` stays a single-service subscription (today's path); each event payload is then
+  run through `executePlan` for the entity follow-ups. Phase 7.
+- `preGatewayExecution` fires once per Fetch node (service + document), same signature as today.
+- Collectors (`collectHeaders` etc.) attach per Fetch node, keyed by the node's path.
 
-Entity batching stays on `single-user-cache` keyed by `${graph}Entity`; `get-query-result.js` unchanged.
+### 4.2 Plan nodes
 
-## 5. Phases / sub-issues (file-level)
+```js
+// lib/planner/nodes.js
+Sequence  { kind:'Sequence', nodes:[Node] }
+Parallel  { kind:'Parallel', nodes:[Node] }
+Fetch     { kind:'Fetch', graph, operationKind:'query'|'mutation', document, variableUsages:[name],
+            requires: SelectionSet|null,     // for entity fetches: key + @requires fields to pull from the partial result
+            entityType: string|null,         // typename for `_entities`; null for root fetches
+            path: [string|'@'] }             // where results merge; '@' = list wildcard (Flatten semantics)
+Condition { kind:'Condition', variable, ifNode, elseNode }   // @skip/@include on a whole branch (optional, later)
+```
+
+### 4.3 Builder (`lib/planner/build-query-plan.js`)
+
+Input: validated `DocumentNode`, `operationName`, `PlanIndex`, gateway schema. Output: a `Sequence`.
+
+1. Inline fragment spreads; expand abstract-type selections into per-concrete-type selections using the gateway
+   schema (interfaces/unions live in the supergraph with `join__implements` / `join__unionMember`).
+2. Walk the selection tree carrying `(typeName, currentGraph, path)`:
+   - a field whose `owners` contains `currentGraph` stays in the current Fetch (prefer no hop);
+   - otherwise open a new entity-fetch group for `(typeName, owner)` under `path`: `owner = pickOwner(...)`:
+     `@override` winner > graph with a key satisfiable from `currentGraph`'s key set > any owner (then phase 6
+     inserts a key-bridge hop);
+   - `@requires` adds the required selection to the *parent* fetch and to the entity representation;
+   - `@provides(graph:G)` on the parent field marks the provided sub-selection as resolvable by G without a hop;
+   - `@inaccessible` fields are absent from the gateway schema, so validation rejects them before planning;
+   - `@interfaceObject` graphs are owners of the interface's fields for every implementing type; representations sent
+     to them use the interface name as `__typename`, and results are merged back by the concrete key.
+3. Group consecutive fetches to the same graph at the same path into one `_entities` Fetch (one request per
+   graph per hop; de-dupe representations by key).
+4. Emit `Sequence` of hops; independent entity fetches at the same depth go in a `Parallel`.
+5. Each Fetch's `document` is printed once at plan time with only the variables it uses. Root-fetch documents keep
+   the original operation name + `Query_<field>` convention for hook compatibility.
+
+### 4.4 Executor (`lib/planner/execute-plan.js`)
+
+- Walks the plan: `Sequence` awaits in order, `Parallel` uses `Promise.all`.
+- Root `Fetch` → `service.sendRequest`; entity `Fetch` → collect representations by walking `path` over the current
+  result (`'@'` iterates arrays), build `{ __typename, ...key, ...requires }`, send one `_entities` request (batched
+  per graph via `allowBatchedQueries` as today through `get-query-result.js`), merge each entity back by position.
+- Errors: service errors get `path` rewritten to the gateway path and are pushed through `FederatedError` so
+  `defaultErrorFormatter` stays unchanged. A failed entity fetch nulls the merged subtree, not the whole response.
+- Stamps nothing on objects; ownership is static in the plan. `single-user-cache` is no longer needed for
+  de-duplication (the plan already groups), but the per-request factory stays for hooks compatibility until phase 7.
+
+### 4.5 Plan cache
+
+`lib/planner/cache.js`: `tiny-lru` keyed by `${schemaVersion}:${operationName}:${hash(printedDocument)}` (replaces
+`lruGatewayResolvers`). `schemaVersion` bumps on every successful `refresh()`. Same `gateway.cache` option.
+
+### 4.6 Exposure / debugging
+
+- `gateway.queryPlan: { expose: boolean | (context) => boolean }` → `extensions.queryPlan` (JSON of the plan tree)
+  and request header `mercurius-query-plan: 1` for ad-hoc inspection. Default off.
+- `app.graphqlGateway.buildQueryPlan(document, operationName)` public API for tests/tooling.
+- `app.graphqlGateway.explain(query)` → printed plan (text), used by the test suite's snapshots.
+
+## 5. Tooling, integration, migration
+
+| Feature | Where | Why |
+|---|---|---|
+| `gateway.supergraphSdl: string \| () => Promise<string>` as an alternative to `services[]` + live composition | `lib/compose/index.js`, `build-gateway.js` | Run from a precomposed supergraph (Rover, Hive, Guild). PlanIndex reads `join__` directives, so any composer works. Also enables static schema at boot without hitting subgraphs. |
+| `app.graphqlGateway.supergraphSdl`, `.publicSdl`, `.planIndex` | `build-gateway.js` | Feed Rover/Router/Hive, schema registries, CI schema checks. |
+| `onGatewayReplaceSchema` hook gets `{ schema, supergraphSdl }` | `handlers.js`, `index.d.ts` | Publish composed SDL on refresh. |
+| `gateway.composition.onError(errors)` / structured `MER_ERR_GQL_GATEWAY_COMPOSITION` with `extensions.code` per Guild rule (e.g. `INVALID_FIELD_SHARING`) | `lib/compose/errors.js` | Actionable errors; same codes as Apollo. |
+| `upgradeSubgraphSdl(sdl, { version: '2.3' })` exported from `@mercuriusjs/federation` | `lib/upgrade.js` | Mechanical v1→v2 migration: adds `extend schema @link(...)`, converts `extend type X @key` to `type X @key` + `@external` retained, adds `@shareable` to value types defined in >1 subgraph (needs all SDLs: `upgradeSubgraphSdls(map)`). Also a bin: `npx @mercuriusjs/federation upgrade schema.graphql`. |
+| Federation version auto-detect + `federation.version` override; warn once per subgraph when a v1 SDL is composed | `service-map.js` | Zero-config migration; visibility. |
+| `gateway.queryPlan.expose` + `explain()` (§4.6) | planner | Debugging/parity testing. |
+| `test/utils/plan-snapshot.js` | tests | Snapshot printed plans for every fixture query; diffs show planner regressions. |
+| Apollo compat `implementations/mercurius-federation` + CI workflow | compat fork | Public conformance badge. |
+
+## 6. Phases / sub-issues (file-level)
 
 | # | Slice | Repo | Files | Est. |
 |---|-------|------|-------|------|
-| 1 | Subgraph: `@link` parse, versioned defs, naming, `_service.sdl` passthrough, repeatable `@key` | federation | link.js, specs.js, naming.js, federation.js, tests | 3–4 d |
-| 2 | Gateway: adopt Guild composition behind `gateway.federation.version` flag; PlanIndex; executable schema from supergraph; composition error mapping. v1 path untouched. | gateway | compose/*, build-gateway.js, service-map.js, errors.js | 4–5 d |
-| 3 | First slice end-to-end: `@link` + `@shareable` (value types and shared entity fields) | gateway | planning/owner.js, selection.js, make-resolver.js, test/fed2/link-shareable.js | 3 d |
-| 4 | `@override`, `@inaccessible`, `@tag` (metadata only), `@composeDirective` passthrough | gateway | planning/owner.js, schema-from-supergraph.js, tests | 2 d |
-| 5 | Keys: multiple `@key`, composite/nested keys, nested `@requires`, `@provides` | gateway | planning/representation.js, requires.js, field-set.js, tests | 4 d |
-| 6 | `@interfaceObject` + interface `@key` | both | federation.js (_Entity), planning/*, test | 3 d |
-| 7 | Multi-hop entity jumps (parent lacks any key the owner accepts) | gateway | planning/owner.js (path search over graphs×keys), make-resolver.js | 4–5 d |
-| 8 | Run all 204 existing tests through the v2 composition path (mixed v1/v2); decide default + major bump | gateway | CI matrix `FED_COMPOSITION=v1|v2` | 2 d |
-| 9 | Conformance: `implementations/mercurius-federation` in Apollo suite + in-repo gateway conformance test | compat fork, gateway | see §2.3, test/conformance/* | 3 d |
-| 10 | Docs, types, README migration guide, upstream PRs to mercurius-js | both | README.md, index.d.ts | 2 d |
+| 1 | Subgraph: `@link` parse, versioned defs, naming/prefix, `_service.sdl` passthrough, repeatable `@key`, `@interfaceObject` in `_Entity` | federation | link.js, specs.js, naming.js, federation.js, tests | 4 d |
+| 2 | Gateway: Guild composition, `PlanIndex`, executable schema from supergraph (strip `join__`, apply `@inaccessible`, keep custom directives), composition errors, `supergraphSdl` input/output | gateway | compose/*, build-gateway.js, service-map.js, errors.js | 5 d |
+| 3 | Planner core: builder + executor + preExecution/root-resolver adapter + plan cache; single-graph ops and single-hop entity fetches with flat keys; first slice tests (`@link`, `@shareable`, `@override`, `@inaccessible`) | gateway | planner/*, build-gateway.js, test/fed2/* | 8–10 d |
+| 4 | Keys: multiple `@key`, composite/nested keys, nested `@requires`, `@provides`, `resolvable:false` | gateway | planner/build-query-plan.js, field-set.js, tests | 4 d |
+| 5 | Abstract types across graphs (interfaces, unions, `join__implements`), `@interfaceObject` | both | planner/*, federation.js, tests | 5 d |
+| 6 | Multi-hop key bridging (owner has no key the current graph can satisfy) via path search over graphs×keys | gateway | planner/paths.js | 4 d |
+| 7 | Parity: all 204 existing tests on the planner; hooks per Fetch, collectors, batching, subscriptions follow-ups, error paths; delete legacy resolver path | gateway | make-resolver.js (remove), handlers.js, collectors.js, test/* | 6 d |
+| 8 | Conformance: compat fork implementation + CI; in-repo gateway conformance test with the suite's 3 schemas + queries; plan snapshots | compat fork, gateway | §2.3, test/conformance/* | 4 d |
+| 9 | Migration tooling: `upgradeSubgraphSdl`, bin, v1 warnings, `queryPlan.expose`/`explain` | federation, gateway | lib/upgrade.js, planner/cache.js | 3 d |
+| 10 | Docs, types, README migration guide, v6 changelogs, upstream PRs to mercurius-js | both | README.md, index.d.ts | 3 d |
 
-Phases 1 and 2 are independent and can run in parallel. 3 depends on 1+2. 5–7 depend on 3. 9 can start after 1
-(subgraph suite) and after 5 (gateway side).
+Total ≈ 9–10 focused weeks. Phases 1 and 2 are independent and can run in parallel. 3 depends on 1+2. 4–7 depend on 3 and are sequential.
+8 can start after 1 (subgraph suite) and after 5 (gateway side). 9 can start after 2.
 
-## 6. Risks / known gaps
+## 7. Risks / known gaps
 
 - **Guild composition drift from Apollo.** Their README states no public spec, possible divergence. Mitigation:
   pin exact version; conformance fixtures; keep `composeSupergraph` behind one module so it can be swapped.
@@ -273,15 +349,13 @@ Phases 1 and 2 are independent and can run in parallel. 3 depends on 1+2. 5–7 
 - **No Docker in this cloud session.** The Apollo suite run happens in the compat fork's CI or locally.
 - **`@requires` as extension marker** (`util.js`) is wrong for Fed 2 and must only apply in v1 mode.
 
-## 7. Open questions (answers change the plan)
+## 8. Decisions log
 
-1. Adopt `@theguild/federation-composition` (recommended) or hand-write Fed 2 composition?
-2. Delivery: new major (`@mercuriusjs/gateway` 6 / `@mercuriusjs/federation` 6) with v2 default and v1 kept behind
-   a flag, or opt-in flag in a minor first?
-3. First slice scope: `@link` + `@shareable` only (issue text) or fold in `@override` + `@inaccessible` since the
-   PlanIndex gives them almost for free?
-4. Planner ambition: keep the resolver-per-field model (this plan) vs. a real plan-then-execute planner. The latter
-   is a rewrite of `make-resolver.js` and the "couple of months" estimate.
-5. Fork `mercurius-js/mercurius-federation` under `dwelch2344` and attach it to the session now?
-6. Should the gateway also expose `supergraphSdl` (e.g. `app.graphqlGateway.supergraphSdl`) for Rover/Router
-   tooling? Cheap once composed.
+| Q | Decision |
+|---|---|
+| Composition library | Adopt `@theguild/federation-composition`, pinned exact version. |
+| Delivery | New majors (gateway 6, federation 6), v2 default, v1 subgraphs auto-detected. |
+| First slice | `@link`, `@shareable`, `@override`, `@inaccessible`. |
+| Execution model | Plan-then-execute planner (§4); legacy resolver path deleted in phase 7. |
+| Repos | Fork `mercurius-js/mercurius-federation` and `apollographql/apollo-federation-subgraph-compatibility` under `dwelch2344`. |
+| Tooling | Everything in §5 is in scope. |
