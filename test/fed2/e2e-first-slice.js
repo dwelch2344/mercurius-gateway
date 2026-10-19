@@ -245,3 +245,48 @@ test('allowBatchedQueries: sibling entity fetches to one subgraph travel in a si
   t.assert.deepStrictEqual(batched[0].map(op => op.variables.representations.length), [1, 2])
   t.assert.strictEqual(p.requests.filter(r => !Array.isArray(r) && r.query.includes('_entities')).length, 0)
 })
+
+test('queryPlan.expose adds extensions.queryPlan to the response', async t => {
+  const u = await usersService(t)
+  const p = await postsService(t)
+  const gateway = await createGateway(t, [{ name: 'users', url: u.url }, { name: 'posts', url: p.url }], {
+    queryPlan: { expose: context => context.reply.request.headers['x-query-plan'] === '1' }
+  })
+
+  const res = await gateway.inject({
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-query-plan': '1' },
+    url: '/graphql',
+    body: JSON.stringify({ query: 'query Q { me { id posts { id } } }' })
+  })
+  const body = JSON.parse(res.body)
+  t.assert.deepStrictEqual(body.data, { me: { id: 'u1', posts: [{ id: 'p1' }, { id: 'p3' }] } })
+  t.assert.strictEqual(body.extensions.queryPlan.operationName, 'Q')
+  t.assert.deepStrictEqual(body.extensions.queryPlan.roots.map(r => r.graph), ['users'])
+  t.assert.deepStrictEqual(body.extensions.queryPlan.roots[0].children[0].path, ['me'])
+  t.assert.match(body.extensions.queryPlan.roots[0].children[0].document, /_entities/)
+
+  const plain = await query(gateway, '{ me { id } }')
+  t.assert.strictEqual(plain.extensions, undefined)
+
+  const always = await createGateway(t, [{ name: 'users', url: u.url }, { name: 'posts', url: p.url }], { queryPlan: { expose: true } })
+  t.assert.ok((await query(always, '{ me { id } }')).extensions.queryPlan)
+
+  const bad = Fastify()
+  t.after(() => bad.close())
+  await t.assert.rejects(async () => bad.register(plugin, { gateway: { services: [{ name: 'users', url: u.url }], queryPlan: { expose: 'yes' } } }), { code: 'MER_ERR_INVALID_OPTS' })
+})
+
+test('a Federation 1 subgraph is reported once in the logs', async t => {
+  const legacy = await createFed2Service(t, 'extend type Query { legacy: Int } type Thing @key(fields: "id") { id: ID! }', { Query: { legacy: () => 1 } })
+  const u = await usersService(t)
+  const warnings = []
+  const gateway = Fastify({ logger: { level: 'warn', stream: { write: line => warnings.push(JSON.parse(line)) } } })
+  t.after(() => gateway.close())
+  await gateway.register(plugin, { gateway: { services: [{ name: 'users', url: u.url }, { name: 'legacy', url: legacy.url }] } })
+  await gateway.graphqlGateway.refresh()
+  const fed1 = warnings.filter(w => /Federation 1/.test(w.msg))
+  t.assert.strictEqual(fed1.length, 1)
+  t.assert.match(fed1[0].msg, /Subgraph "legacy" uses Federation 1/)
+  t.assert.deepStrictEqual(gateway.graphqlGateway.federationVersions, { users: 2, legacy: 1 })
+})

@@ -202,6 +202,13 @@ export interface MercuriusGatewayOptions {
      * When set the gateway runs from it instead of composing the subgraph SDLs; `services` still provide the endpoints.
      */
     supergraphSdl?: string | (() => string | Promise<string>);
+    /**
+     * Expose the query plan of each operation as `extensions.queryPlan` in the response,
+     * always (`true`) or when the function returns true for the request context.
+     */
+    queryPlan?: {
+      expose?: boolean | ((context: MercuriusContext) => boolean | Promise<boolean>);
+    };
     pollingInterval?: number;
     errorHandler?(error: Error, service: MercuriusGatewayService): void;
     retryServicesCount?: number;

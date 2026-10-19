@@ -386,3 +386,9 @@ app.register(mercuriusGatewayPlugin, {
     supergraphSdl: async () => 'schema { query: Query }'
   }
 })
+app.register(mercuriusGatewayPlugin, {
+  gateway: {
+    services: [{ name: 'user', url: 'http://localhost:4001/graphql' }],
+    queryPlan: { expose: (context) => context.reply.request.headers['x-plan'] === '1' }
+  }
+})
