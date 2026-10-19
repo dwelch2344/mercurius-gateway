@@ -17,8 +17,8 @@
     "lint:typescript:fix": "standard --parser @typescript-eslint/parser --plugin @typescript-eslint/eslint-plugin test/types/*.ts --fix",
     "example": "node example/index.js",
     "test": "npm run lint && npm run test:types && npm run test:unit ",
-    "test:unit": "node --test --test-timeout=120000 test/*.js",
-    "test:cov": "c8 node --test --test-timeout=120000 test/*.js",
+    "test:unit": "node --test --test-timeout=120000 test/*.js test/fed2/*.js",
+    "test:cov": "c8 node --test --test-timeout=120000 test/*.js test/fed2/*.js",
     "test:types": "tsd",
     "prepare": "husky"
   },
@@ -64,6 +64,7 @@
   "dependencies": {
     "@mercuriusjs/federation": "^5.0.0",
     "@mercuriusjs/subscription-client": "^2.0.0",
+    "@theguild/federation-composition": "0.27.0",
     "fastify-plugin": "^6.0.1",
     "graphql": "^16.12.0",
     "graphql-ws": "^6.0.6",
