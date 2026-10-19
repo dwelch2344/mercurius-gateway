@@ -115,7 +115,7 @@ test('Uses the supplied schema for federation rather than fetching it remotely',
 
     type User @key(fields: "id") @extends {
       id: ID! @external
-      name: String @external
+      name: String! @external
       posts: [Post]
       numberOfPosts: Int @requires(fields: "id")
     }
@@ -644,7 +644,7 @@ test('It builds the gateway schema correctly with two services query extension h
 
     type User @key(fields: "id") @extends {
       id: ID! @external
-      name: String @external
+      name: String! @external
       posts: [Post]
       numberOfPosts: Int @requires(fields: "id")
     }

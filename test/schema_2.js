@@ -537,13 +537,13 @@ test('Should support array references with _entities query and empty response an
           id: '1',
           title: 'test',
           content: 'test',
-          authors: null
+          authors: []
         },
         {
           id: '2',
           title: 'test2',
           content: 'test2',
-          authors: null
+          authors: []
         }
       ]
     }

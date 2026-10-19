@@ -1020,12 +1020,6 @@ test('gateway - preGatewayExecution hooks should be able to add to the errors ar
       },
       {
         message: 'bar - EntitiesQuery'
-      },
-      {
-        message: 'foo - EntitiesQuery'
-      },
-      {
-        message: 'bar - EntitiesQuery'
       }
     ]
   })

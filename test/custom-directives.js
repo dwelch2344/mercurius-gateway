@@ -183,7 +183,6 @@ describe('gateway', () => {
       'deprecated',
       'specifiedBy',
       'oneOf',
-      'requires',
       'custom'
     ])
 

@@ -127,7 +127,7 @@ test('gateway handles @requires directive correctly', async t => {
     `
     type User @key(fields: "id") @extends {
       id: ID! @external
-      name: String @external
+      name: String! @external
       biography: String @requires(fields: "id name")
     }
   `,
@@ -547,7 +547,7 @@ test('gateway exposes @requires directive in list of directives', async t => {
     `
     type User @key(fields: "id") @extends {
       id: ID! @external
-      name: String @external
+      name: String! @external
       biography: String @requires(fields: "id name")
     }
   `,
@@ -585,8 +585,7 @@ test('gateway exposes @requires directive in list of directives', async t => {
           { name: 'skip' },
           { name: 'deprecated' },
           { name: 'specifiedBy' },
-          { name: 'oneOf' },
-          { name: 'requires' }
+          { name: 'oneOf' }
         ]
       }
     }

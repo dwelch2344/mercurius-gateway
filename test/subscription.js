@@ -1074,7 +1074,7 @@ test('subscriptions work with different contexts', async t => {
   }
 
   type Event @key(fields: "value") {
-    value: Int! @external
+    value: Int!
   }
 
   extend type Subscription {
@@ -1286,7 +1286,7 @@ test('connection_init headers available in federation event resolver', async t =
         ignoredResolver: Boolean!
       }
 
-      extend type Event @key(fields: "value") {
+      extend type Event @key(fields: "id") {
         id: ID! @external
         userId: Int!
       }
@@ -1550,7 +1550,7 @@ test('gateway subscription handling works correctly after a schema refresh', asy
         ignoredResolver: Boolean!
       }
 
-      extend type Event @key(fields: "value") {
+      extend type Event @key(fields: "id") {
         id: ID! @external
         userId: Int!
       }
@@ -1789,7 +1789,7 @@ test('gateway subscription handling works correctly after a schema refresh', asy
         ignoredResolver: Boolean!
       }
 
-      extend type Event @key(fields: "value") {
+      extend type Event @key(fields: "id") {
         id: ID! @external
         userId: Int!
         newField: String

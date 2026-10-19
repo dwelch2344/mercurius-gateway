@@ -375,7 +375,7 @@ test('gateway distributes query correctly to services when querying with inline 
     {
       Query: {
         me: () => {
-          return users.u1
+          return { __typename: 'User', ...users.u1 }
         }
       },
       User: {
@@ -586,61 +586,23 @@ test('gateway handles missing @key', async t => {
     await userService.close()
   })
 
-  await gateway.register(plugin, {
-    gateway: {
-      services: [
-        {
-          name: 'user',
-          url: `http://localhost:${userServicePort}/graphql`
-        },
-        {
-          name: 'post',
-          url: `http://localhost:${postServicePort}/graphql`
-        }
-      ]
-    }
-  })
-
-  const query = `
-    query {
-      me {
-        id
-        name
-        numberOfPosts
-      }
-    }
-  `
-
-  const res = await gateway.inject({
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json'
-    },
-    url: '/graphql',
-    body: JSON.stringify({
-      query
-    })
-  })
-
-  t.assert.deepStrictEqual(JSON.parse(res.body), {
-    data: {
-      me: {
-        id: 'u1',
-        name: 'John',
-        numberOfPosts: null
-      }
-    },
-    errors: [
-      {
-        message: 'Missing @key directive in User type',
-        locations: [
+  // Composition rejects a type that is extended with @key in one subgraph but
+  // declares no @key where it is defined.
+  await t.assert.rejects(
+    async () => gateway.register(plugin, {
+      gateway: {
+        services: [
           {
-            line: 6,
-            column: 9
+            name: 'user',
+            url: `http://localhost:${userServicePort}/graphql`
+          },
+          {
+            name: 'post',
+            url: `http://localhost:${postServicePort}/graphql`
           }
-        ],
-        path: ['me', 'numberOfPosts']
+        ]
       }
-    ]
-  })
+    }),
+    err => err.code === 'MER_ERR_GQL_GATEWAY_COMPOSITION' && /type "User" has no @key defined in subgraph "user"/.test(err.message)
+  )
 })

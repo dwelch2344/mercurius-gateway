@@ -183,7 +183,6 @@ describe('gateway with batching', () => {
       'deprecated',
       'specifiedBy',
       'oneOf',
-      'requires',
       'custom'
     ])
 

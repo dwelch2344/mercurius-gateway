@@ -55,7 +55,7 @@ const postService = {
 
   type User @key(fields: "id") @extends {
     id: ID! @external
-    name: String @external
+    name: String! @external
     posts(count: Int): [Post]
   }
 `,
