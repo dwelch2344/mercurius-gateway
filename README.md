@@ -1,6 +1,10 @@
 # @mercurius/gateway
 
-A module to create an Apollo Federation v1 gateway with `mercurius`.
+A module to create an Apollo Federation gateway with `mercurius`. Subgraphs can speak
+Federation 1 (`extend type` / `@extends`) or Federation 2 (`@link`, `@shareable`, `@override`,
+`@inaccessible`, `@interfaceObject`, ...); the gateway composes them into a supergraph and
+executes each operation through a query plan. See [Federation 2](#federation-2) and
+[Migrating from v5](#migrating-from-v5).
 
 ## Quick start
 
@@ -149,6 +153,114 @@ gateway.register(mercuriusGateway, {
 gateway.listen({ port: 3000 })
 ```
 
+## Federation 2
+
+The gateway composes the subgraph SDLs with
+[`@theguild/federation-composition`](https://github.com/the-guild-org/federation-composition)
+(MIT, API-compatible with Apollo's composition) and derives everything it needs from the
+resulting supergraph: the public API schema (with `@inaccessible` elements removed and
+`@tag` metadata stripped) and a *plan index* describing which subgraph resolves which field,
+with which `@key`s, `@requires`, `@provides` and `@override` rules.
+
+Subgraphs are detected per SDL: an SDL with `extend schema @link(url: "https://specs.apollo.dev/federation/v2.x", ...)`
+is Federation 2, anything else is Federation 1. Both can be mixed in one gateway. On the subgraph side use
+`@mercuriusjs/federation` v6 (or any library that implements the subgraph specification).
+
+```js
+// users subgraph
+const schema = `
+  extend schema @link(url: "https://specs.apollo.dev/federation/v2.3", import: ["@key", "@shareable"])
+
+  type Query { me: User }
+  type User @key(fields: "id") {
+    id: ID!
+    name: String @shareable
+    email: String
+  }
+`
+
+// posts subgraph
+const schema = `
+  extend schema @link(url: "https://specs.apollo.dev/federation/v2.3", import: ["@key", "@shareable", "@override", "@external", "@requires"])
+
+  type Query { posts: [Post!]! }
+  type Post @key(fields: "id") { id: ID! title: String author: User }
+  type User @key(fields: "id") {
+    id: ID!
+    email: String @external
+    name: String @override(from: "users")
+    posts: [Post!]!
+    initials: String @requires(fields: "email")
+  }
+`
+```
+
+Nothing changes on the gateway side: register the services as before.
+
+### Query planning
+
+Each operation is planned once (plans are cached per parsed document) and executed as a tree of
+fetches: one root fetch per subgraph for the root fields it owns, then `_entities` fetches for the
+fields other subgraphs resolve, keyed on a `@key` the current subgraph can supply. `@requires` fields
+are gathered first, `@provides` fields are served inline, multiple keys, composite keys, nested value
+types, interfaces, unions, `@interfaceObject` and multi-hop key translation are handled. Sibling
+fetches to a subgraph configured with `allowBatchedQueries` share one request.
+
+```js
+console.log(app.graphqlGateway.explain('{ me { id posts { id } } }'))
+// QueryPlan(query) {
+//   Parallel {
+//     Fetch(graph: users) {
+//       query Query_me { me { id __typename } }
+//       then {
+//         Flatten(path: me) Fetch(graph: posts, type: User, key: "id") {
+//           query EntitiesQuery($representations: [_Any!]!) { _entities(representations: $representations) { __typename ... on User { posts { id } } } }
+//         }
+//       }
+//     }
+//   }
+// }
+```
+
+`app.graphqlGateway.buildQueryPlan(source, operationName)` returns the plan as an object, and
+`gateway.queryPlan.expose` adds it to every response as `extensions.queryPlan`:
+
+```js
+app.register(mercuriusGateway, {
+  gateway: {
+    services,
+    queryPlan: { expose: context => context.reply.request.headers['x-query-plan'] === '1' }
+  }
+})
+```
+
+### Running from a precomposed supergraph
+
+Instead of composing at startup, hand the gateway a supergraph SDL produced by Rover, GraphQL Hive
+or this gateway itself (`app.graphqlGateway.supergraphSdl`). The subgraph names in the supergraph
+must match the configured `services`, which then only provide the endpoints.
+
+```js
+app.register(mercuriusGateway, {
+  gateway: {
+    services: [{ name: 'users', url: 'http://users:4001/graphql' }, { name: 'posts', url: 'http://posts:4002/graphql' }],
+    supergraphSdl: () => fs.promises.readFile('./supergraph.graphql', 'utf8')
+  }
+})
+```
+
+A function is re-evaluated on every `pollingInterval` / `refresh()`.
+
+### Composition errors
+
+Invalid or conflicting subgraph SDLs fail at registration (or are logged on refresh) with
+`MER_ERR_GQL_GATEWAY_COMPOSITION`. `err.errors` holds one `GraphQLError` per problem with the same
+`extensions.code` Apollo uses (`INVALID_FIELD_SHARING`, `SATISFIABILITY_ERROR`,
+`EXTERNAL_MISSING_ON_BASE`, ...).
+
+Subgraphs that still speak Federation 1 are reported once in the logs; `@mercuriusjs/federation`
+ships `upgradeSubgraphSdl()` / `mercurius-federation-upgrade` to convert them.
+
 ## API
 
 ### mercuriusGateway
@@ -214,6 +326,23 @@ app.register(mercuriusGateway, {
   - `gateway.retryServicesCount`: `Number` Specifies the maximum number of retries when a service fails to start on gateway initialization. (Default: 10)
   - `gateway.retryServicesInterval`: `Number` The amount of time(in milliseconds) between service retry attempts in case a service fails to start on gateway initialization. (Default: 3000)
   - `gateway.pollingInterval`: `Number` The amount of time (milliseconds) between polling the services for schema updates. If not specified, the gateway will not poll for schema updates. When `gateway.services` is a function, the list of services is updated with the result of the function every `gateway.pollingInterval` milliseconds.
+  - `gateway.supergraphSdl`: `String` | `Function` A precomposed supergraph SDL (or a function returning one, possibly asynchronously) to run from instead of composing the service SDLs. See [Running from a precomposed supergraph](#running-from-a-precomposed-supergraph).
+  - `gateway.queryPlan.expose`: `Boolean` | `Function` Add the query plan to the response as `extensions.queryPlan`, always or when the function (receiving the request context) returns `true`. (Default: `false`)
+  - `gateway.cache`: `Boolean` | `Number` Query plan caching. `false` disables it; plans are otherwise cached per parsed document (the number is accepted for compatibility). (Default: `true`)
+
+#### `fastify.graphqlGateway`
+
+The plugin decorates the instance with the gateway:
+
+- `schema`: the executable API schema (also `fastify.graphql.schema`).
+- `supergraphSdl`: the composed supergraph SDL (join spec); feed it to Rover, Apollo Router, Hive or another gateway's `supergraphSdl` option.
+- `publicSdl`: the API schema as SDL.
+- `planIndex`: the ownership index derived from the supergraph (`types[name].fields[field].owners`, keys per subgraph, ...).
+- `federationVersions`: `{ [serviceName]: 1 | 2 }` as detected from each SDL (empty when running from `supergraphSdl`).
+- `buildQueryPlan(source, operationName?)` / `explain(source, operationName?)`: the query plan for an operation, as an object or as text.
+- `refresh(isRetry?)`: re-fetch the service SDLs, recompose and replace the schema; resolves to the new schema or `null` when nothing changed.
+- `serviceMap`: the configured services (`setSchema(sdl)` updates a service that was configured with a static `schema`).
+- `addHook(name, fn)`: see [Hooks](#hooks).
 
 ## Hooks
 
@@ -401,7 +530,7 @@ When the Gateway service obtains new versions of federated schemas within a defi
 
 It has the following parameters:
 
-- `instance` - The gateway server `FastifyInstance` (this contains the old schema).
+- `instance` - The gateway server `FastifyInstance` (this contains the old schema; `instance.graphqlGateway.supergraphSdl` and `planIndex` already hold the new composition).
 - `schema` - The new schema that has been built from the gateway refresh.
 
 ```js
@@ -461,3 +590,29 @@ It is possible to access and manipulate `context.collectors` via [onResolution H
     execution.collectors = context.collectors // add collectors to response
   })
 ```
+## Migrating from v5
+
+v6 replaces the per-field resolvers of v5 with composition + query planning. Federation 1 subgraphs
+keep working unchanged, but a few observable behaviours differ:
+
+- **Composition is strict.** Subgraph SDLs that v5 merged silently now fail at startup with
+  `MER_ERR_GQL_GATEWAY_COMPOSITION`: a field with different types or nullability across subgraphs
+  (`name: String` vs `name: String!`), a `@key` on a field the subgraph does not declare, a field
+  marked `@external` everywhere, a type extended with `@key` but defined without one, unsatisfiable
+  queries. Fix the SDLs; the error lists every problem with its code.
+- **Fewer requests.** All fields a subgraph resolves at one position travel in one request, and
+  entity fetches to the same subgraph are batched per hop. Hooks such as `preGatewayExecution`
+  therefore fire fewer times; `Query_<field>` and `EntitiesQuery` remain the operation names.
+- **`@requires` is no longer exposed** as a directive of the gateway schema.
+- **Empty reference lists** resolve to `[]` instead of `null`.
+- **Null entities.** When a subgraph returns `null` for a representation, a bare reference (an
+  object that only carried `__typename` and key fields) becomes `null` as before, while an object
+  that already had data from its own subgraph keeps it and only the fields of that fetch become `null`.
+- **Field order** in the API schema follows the supergraph rather than the first subgraph.
+- **`gateway.cache`** now controls query plan caching; the size is ignored.
+- Removed internals: `lib/gateway/make-resolver.js`, `find-value-types.js`, `get-query-result.js`,
+  the per-service `typeMap` / `types` / `extensionTypeMap` properties and the `single-user-cache` dependency.
+
+Subgraph migration to Federation 2 is optional and incremental: `@mercuriusjs/federation` provides
+`upgradeSubgraphSdl()` and the `mercurius-federation-upgrade` command to add `@link` and `@shareable`
+to a Federation 1 SDL.
