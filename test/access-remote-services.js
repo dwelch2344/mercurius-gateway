@@ -160,6 +160,8 @@ test(
 
     let warnCalled = 0
     gateway.log.warn = message => {
+      // the Federation 1 notice for "working" is not what this test is about
+      if (/uses Federation 1/.test(message)) return
       t.assert.strictEqual(message, SNAPSHOT_RESULTS[warnCalled++])
     }
 

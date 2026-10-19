@@ -899,13 +899,15 @@ describe('pollingInterval', () => {
 
     await restartedUserService.listen({ port: userServicePort })
 
+    // The refresh fetches the new SDL over HTTP: wait for the schema to be
+    // replaced instead of racing it with a fixed number of event-loop turns.
+    const replaced = new Promise(resolve => {
+      gateway.graphqlGateway.addHook('onGatewayReplaceSchema', async () => resolve())
+    })
     for (let i = 0; i < 100; i++) {
       await clock.tickAsync(100)
     }
-
-    // We need the event loop to actually spin twice to
-    // be able to propagate the change
-    await immediate()
+    await replaced
     await immediate()
 
     const res2 = await gateway.inject({

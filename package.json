@@ -62,7 +62,7 @@
     "*.{js,jsx}": "standard --cache --fix"
   },
   "dependencies": {
-    "@mercuriusjs/federation": "https://codeload.github.com/dwelch2344/mercurius-federation/tar.gz/feat/fed2-link",
+    "@mercuriusjs/federation": "https://codeload.github.com/dwelch2344/mercurius-federation/tar.gz/3f235b92ebc0139e28117c2e6239abce9ec90a9d",
     "@mercuriusjs/subscription-client": "^2.0.0",
     "@theguild/federation-composition": "0.27.0",
     "fastify-plugin": "^6.0.1",
