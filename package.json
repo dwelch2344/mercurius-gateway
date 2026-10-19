@@ -17,8 +17,8 @@
     "lint:typescript:fix": "standard --parser @typescript-eslint/parser --plugin @typescript-eslint/eslint-plugin test/types/*.ts --fix",
     "example": "node example/index.js",
     "test": "npm run lint && npm run test:types && npm run test:unit ",
-    "test:unit": "node --test --test-timeout=120000 test/*.js test/fed2/*.js",
-    "test:cov": "c8 node --test --test-timeout=120000 test/*.js test/fed2/*.js",
+    "test:unit": "node --test --test-timeout=120000 test/*.js test/fed2/*.js test/conformance/*.js",
+    "test:cov": "c8 node --test --test-timeout=120000 test/*.js test/fed2/*.js test/conformance/*.js",
     "test:types": "tsd",
     "prepare": "husky"
   },
@@ -62,7 +62,7 @@
     "*.{js,jsx}": "standard --cache --fix"
   },
   "dependencies": {
-    "@mercuriusjs/federation": "^5.0.0",
+    "@mercuriusjs/federation": "https://codeload.github.com/dwelch2344/mercurius-federation/tar.gz/feat/fed2-link",
     "@mercuriusjs/subscription-client": "^2.0.0",
     "@theguild/federation-composition": "0.27.0",
     "fastify-plugin": "^6.0.1",
