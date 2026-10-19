@@ -2,7 +2,7 @@ import { expectAssignable, expectError } from 'tsd'
 import Fastify, { FastifyInstance } from 'fastify'
 import { MercuriusContext } from 'mercurius'
 
-import mercuriusGatewayPlugin, { MercuriusServiceMetadata } from '../../index'
+import mercuriusGatewayPlugin, { MercuriusServiceMetadata, QueryPlan, PlanIndex } from '../../index'
 import { DocumentNode, GraphQLSchema } from 'graphql'
 import { Agent } from 'undici'
 
@@ -364,4 +364,25 @@ app.graphqlGateway.addHook('onGatewayReplaceSchema', async function (instance, s
 app.graphqlGateway.addHook('onGatewayReplaceSchema', function (instance, schema) {
   expectAssignable<FastifyInstance>(instance)
   expectAssignable<GraphQLSchema>(schema)
+})
+
+// federation 2 gateway API
+expectAssignable<string>(app.graphqlGateway.supergraphSdl)
+expectAssignable<string>(app.graphqlGateway.publicSdl)
+expectAssignable<PlanIndex>(app.graphqlGateway.planIndex)
+expectAssignable<Record<string, 1 | 2>>(app.graphqlGateway.federationVersions)
+expectAssignable<QueryPlan>(app.graphqlGateway.buildQueryPlan('{ me { id } }'))
+expectAssignable<string>(app.graphqlGateway.explain('{ me { id } }', 'Q'))
+
+app.register(mercuriusGatewayPlugin, {
+  gateway: {
+    services: [{ name: 'user', url: 'http://localhost:4001/graphql' }],
+    supergraphSdl: 'schema { query: Query }'
+  }
+})
+app.register(mercuriusGatewayPlugin, {
+  gateway: {
+    services: [{ name: 'user', url: 'http://localhost:4001/graphql' }],
+    supergraphSdl: async () => 'schema { query: Query }'
+  }
 })

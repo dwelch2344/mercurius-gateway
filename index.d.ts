@@ -13,9 +13,80 @@ interface ServiceConfig {
   setSchema: (schema: string) => ServiceConfig;
 }
 
+/**
+ * A query plan: the tree of subgraph fetches executed for one operation.
+ */
+export interface QueryPlanFetchNode {
+  id: number;
+  graph: string;
+  operation: 'query' | 'mutation' | 'subscription';
+  /** `null` for a root fetch, the entity type name for an `_entities` fetch */
+  entityType: string | null;
+  /** response path of the parent objects; `@` descends into lists */
+  path: string[];
+  /** root fetches: the response keys this fetch provides */
+  responseKeys: string[];
+  variableNames: Set<string>;
+  documentNode: DocumentNode;
+  document: string;
+  children: QueryPlanFetchNode[];
+}
+
+export interface QueryPlan {
+  operation: 'query' | 'mutation' | 'subscription';
+  operationName: string | null;
+  /** true for mutations: root fetches run one after another */
+  ordered: boolean;
+  roots: QueryPlanFetchNode[];
+}
+
+/**
+ * Per-field / per-type ownership derived from the supergraph `join__` directives.
+ */
+export interface PlanIndexField {
+  name: string;
+  owners: Set<string>;
+  external: Set<string>;
+  requires: Record<string, { fields: string }>;
+  provides: Record<string, { fields: string }>;
+  overrideFrom: string | null;
+  overridingGraph: string | null;
+  viaInterfaceObject: boolean;
+  inaccessible: boolean;
+  arguments: string[];
+}
+
+export interface PlanIndexType {
+  name: string;
+  kind: 'OBJECT' | 'INTERFACE' | 'UNION' | 'ENUM' | 'INPUT_OBJECT' | 'SCALAR';
+  graphs: Record<string, { keys: Array<{ fields: string; resolvable: boolean }>; resolvable: boolean; isInterfaceObject: boolean; extension: boolean }>;
+  interfaces: string[];
+  fields: Record<string, PlanIndexField>;
+  inaccessible: boolean;
+}
+
+export interface PlanIndex {
+  graphs: Record<string, { name: string; enumValue: string; url: string }>;
+  graphByEnum: Record<string, string>;
+  types: Record<string, PlanIndexType>;
+}
+
 interface Gateway {
   refresh: (isRetry?: boolean) => Promise<GraphQLSchema | null>;
   serviceMap: Record<string, ServiceConfig>;
+  /** the executable API schema */
+  schema: GraphQLSchema;
+  /** the composed supergraph (join spec), consumable by Rover, Router, Hive and this gateway's `supergraphSdl` option */
+  supergraphSdl: string;
+  /** the API schema SDL (no federation machinery, no @inaccessible elements) */
+  publicSdl: string;
+  planIndex: PlanIndex;
+  /** federation version detected per subgraph (1 or 2); empty when running from a precomposed supergraph */
+  federationVersions: Record<string, 1 | 2>;
+  /** build the query plan for an operation (validated against the API schema) */
+  buildQueryPlan: (source: string | DocumentNode, operationName?: string) => QueryPlan;
+  /** human-readable query plan */
+  explain: (source: string | DocumentNode, operationName?: string) => string;
 
   /**
    * `preGatewayExecution` is the hook to be executed in the GraphQL gateway request lifecycle.
@@ -126,6 +197,11 @@ export interface MercuriusGatewayService {
 export interface MercuriusGatewayOptions {
   gateway: {
     services: Array<MercuriusGatewayService> | (() => Promise<Array<MercuriusGatewayService>>);
+    /**
+     * A precomposed supergraph SDL (join spec, e.g. from Rover, Hive or this gateway's `supergraphSdl`).
+     * When set the gateway runs from it instead of composing the subgraph SDLs; `services` still provide the endpoints.
+     */
+    supergraphSdl?: string | (() => string | Promise<string>);
     pollingInterval?: number;
     errorHandler?(error: Error, service: MercuriusGatewayService): void;
     retryServicesCount?: number;
