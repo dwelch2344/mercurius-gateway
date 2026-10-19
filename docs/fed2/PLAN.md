@@ -3,6 +3,23 @@
 Issue: https://github.com/dwelch2344/mercurius-gateway/issues/1
 Date: 2026-10-18. Baseline: `@mercuriusjs/gateway` 5.2.0, `@mercuriusjs/federation` 5.1.1, 204/204 tests green.
 
+## Status (2026-10-19)
+
+| Phase | Issue | Branch | State |
+|---|---|---|---|
+| 1 subgraph `@link` | #2 | `mercurius-federation` `feat/fed2-link` | done (98 pass, 2 pre-existing upstream failures) |
+| 2 composition + PlanIndex | #3 | `mercurius-gateway` `feat/fed2-composition` | done |
+| 3 planner core + first slice | #4 | same | done |
+| 4 keys | #5 | same | done |
+| 5 abstract types + `@interfaceObject` | #6 | same | done |
+| 6 key bridging | #7 | same | done |
+| 7 parity + cleanup | #8 | same | done (258/258) |
+| 8 conformance | #9 | compat fork `mercurius-federation` + `test/conformance` | done; Apollo suite CI run pending in the fork |
+| 9 migration tooling | #10 | both | done |
+| 10 docs | #11 | both | README + MIGRATION written; upstream PRs not opened |
+
+The gateway branch installs `@mercuriusjs/federation` from a commit tarball of the fork until v6 is published.
+
 ## 0. Findings from the audit (what changes the plan)
 
 1. **The gateway has no query planner.** Execution is graphql-js running the composed schema; each field gets a
