@@ -159,7 +159,7 @@ test('printPlan renders the tree', t => {
   t.assert.match(text, /Flatten\(path: me\) Fetch\(graph: post, type: User, key: "id"\)/)
 })
 
-test('unsupported (phase 6): key bridging through a third subgraph raises a planning error', t => {
+test('key bridging: hops through a subgraph that can translate one key into another', t => {
   const composed = composeSupergraph({
     services: [
       { name: 'a', schemaDefinition: 'type Query { t: T } type T @key(fields: "id") { id: ID! }' },
@@ -167,5 +167,23 @@ test('unsupported (phase 6): key bridging through a third subgraph raises a plan
       { name: 'c', schemaDefinition: 'type T @key(fields: "sku") { sku: ID! x: Int } type Query { v: Int }' }
     ]
   })
-  t.assert.throws(() => plan(composed, '{ t { x } }'), { code: 'MER_ERR_GQL_GATEWAY_PLANNING_UNSUPPORTED', message: /multi-hop/ })
+  const p = plan(composed, '{ t { x } }')
+  const root = p.roots[0]
+  t.assert.strictEqual(root.graph, 'a')
+  t.assert.match(root.document, /t \{\n {4}__typename\n {4}id\n {2}\}/)
+  const bridge = root.children[0]
+  t.assert.strictEqual(bridge.graph, 'b')
+  t.assert.match(bridge.document, /\.\.\. on T \{\n {6}sku\n {4}\}/)
+  const target = bridge.children[0]
+  t.assert.strictEqual(target.graph, 'c')
+  t.assert.strictEqual(target.keyFields.selections[0].name.value, 'sku')
+  t.assert.match(target.document, /\.\.\. on T \{\n {6}x\n {4}\}/)
+
+  // an unreachable owner is already rejected by composition (SATISFIABILITY_ERROR)
+  t.assert.throws(() => composeSupergraph({
+    services: [
+      { name: 'a', schemaDefinition: 'type Query { t: T } type T @key(fields: "id") { id: ID! }' },
+      { name: 'c', schemaDefinition: 'type T @key(fields: "sku", resolvable: false) { sku: ID! x: Int } type Query { v: Int }' }
+    ]
+  }), { code: 'MER_ERR_GQL_GATEWAY_COMPOSITION', message: /SATISFIABILITY_ERROR/ })
 })
