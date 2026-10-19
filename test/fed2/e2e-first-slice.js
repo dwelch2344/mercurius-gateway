@@ -36,7 +36,7 @@ async function usersService (t) {
   })
 }
 
-async function postsService (t) {
+async function postsService (t, opts) {
   return createFed2Service(t, `
     ${LINK}
     type Query { posts: [Post!]! }
@@ -69,7 +69,7 @@ async function postsService (t) {
       pageInfo: () => ({ hasNextPage: false }),
       avg: user => Math.round(user.totalProductsCreated / user.yearsOfEmployment)
     }
-  })
+  }, opts)
 }
 
 async function createGateway (t, services, extra = {}) {
@@ -225,4 +225,23 @@ test('a precomposed supergraphSdl drives the gateway; services are only used as 
     async () => bad.register(plugin, { gateway: { services: [{ name: 'users', url: u.url }], supergraphSdl } }),
     { code: 'MER_ERR_GQL_GATEWAY_INIT', message: /subgraph "posts"/ }
   )
+})
+
+test('allowBatchedQueries: sibling entity fetches to one subgraph travel in a single batched request', async t => {
+  const u = await usersService(t)
+  const p = await postsService(t, { allowBatchedQueries: true })
+  const gateway = await createGateway(t, [{ name: 'users', url: u.url }, { name: 'posts', url: p.url, allowBatchedQueries: true }])
+
+  const result = await query(gateway, '{ me { id posts { id } } users { id pageInfo { hasNextPage } } }')
+  t.assert.deepStrictEqual(result, {
+    data: {
+      me: { id: 'u1', posts: [{ id: 'p1' }, { id: 'p3' }] },
+      users: [{ id: 'u1', pageInfo: { hasNextPage: false } }, { id: 'u2', pageInfo: { hasNextPage: false } }]
+    }
+  })
+  const batched = p.requests.filter(Array.isArray)
+  t.assert.strictEqual(batched.length, 1)
+  t.assert.strictEqual(batched[0].length, 2)
+  t.assert.deepStrictEqual(batched[0].map(op => op.variables.representations.length), [1, 2])
+  t.assert.strictEqual(p.requests.filter(r => !Array.isArray(r) && r.query.includes('_entities')).length, 0)
 })

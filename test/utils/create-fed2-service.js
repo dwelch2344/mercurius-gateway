@@ -12,7 +12,8 @@ async function createFed2Service (t, schema, resolvers = {}, opts = {}) {
   const service = Fastify()
   const requests = []
   service.addHook('preHandler', async (req) => {
-    if (req.body && req.body.query && !req.body.query.includes('_service')) requests.push(req.body)
+    if (Array.isArray(req.body)) requests.push(req.body)
+    else if (req.body && req.body.query && !req.body.query.includes('_service')) requests.push(req.body)
   })
   service.register(GQL, {
     schema: buildFederationSchema(schema),

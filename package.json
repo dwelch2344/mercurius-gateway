@@ -70,7 +70,6 @@
     "graphql-ws": "^6.0.6",
     "mercurius": "^16.6.0",
     "p-map": "^7.0.4",
-    "single-user-cache": "^2.1.0",
     "tiny-lru": "^13.0.0",
     "undici": "^7.16.0",
     "use-strict": "1.0.1",
